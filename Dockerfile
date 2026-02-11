@@ -35,6 +35,9 @@ RUN pip install --upgrade pip setuptools wheel
 
 # Install scientific stack
 RUN pip install --no-cache-dir \
+    pytz \
+    tzdata \
+    python-dateutil \
     numpy \
     pandas \
     pysam \
