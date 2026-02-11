@@ -1,16 +1,14 @@
-FROM debian:bullseye-slim
+FROM python:3.12.6-slim-bullseye
 MAINTAINER "Irenaeus Chan <chani@wustl.edu>"
 
 # Volumes
 VOLUME /build
 
-ARG TAG=v0.0.0
+ARG TAG=v0.0.1
 ARG PYTHON_VERSION=3.12.6
 
-# Install build dependencies
+# Install system dependencies
 RUN apt-get update -qq \
-    && apt-get -y install apt-transport-https ca-certificates \
-    && apt-get update -qq \
     && apt-get -y install \
     build-essential \
     git \
@@ -20,27 +18,26 @@ RUN apt-get update -qq \
     libcurl4-openssl-dev \
     curl \
     wget \
-    libssl-dev \
-    zlib1g-dev \
+    gfortran \
+    libopenblas-dev \
+    liblapack-dev \
+    pkg-config \
     libbz2-dev \
-    libreadline-dev \
-    libsqlite3-dev \
-    libffi-dev \
-    --no-install-recommends
+    liblzma-dev \
+    libncurses5-dev \
+    zlib1g-dev \
+    --no-install-recommends \
+    && apt-get clean all \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN apt-get clean all
+# Upgrade pip and install packages
+RUN pip install --upgrade pip setuptools wheel
 
-# Download and install Python
-RUN wget https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tgz \
-    && tar -xzf Python-$PYTHON_VERSION.tgz \
-    && cd Python-$PYTHON_VERSION \
-    && ./configure --prefix=/opt/python-$PYTHON_VERSION \
-    && make \
-    && make install
+# Install scientific stack
+RUN pip install --no-cache-dir \
+    numpy \
+    pandas \
+    pysam \
+    click
 
-# Update PATH
-ENV PATH="/opt/python-$PYTHON_VERSION:$PATH"
-
-# Install pip and the package
-RUN /opt/python-$PYTHON_VERSION/bin/pip3 install --upgrade pip
-RUN /opt/python-$PYTHON_VERSION/bin/pip3 install --upgrade git+https://github.com/IrenaeusChan/DNA-RECAP.git
+RUN pip install --upgrade git+https://github.com/IrenaeusChan/DNA-RECAP.git
