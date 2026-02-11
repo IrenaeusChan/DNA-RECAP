@@ -1,0 +1,11 @@
+args==0.1.0
+click>=8.0.3
+clint==0.5.1
+numpy==1.26.0
+pandas==2.0.0
+python-dateutil==2.8.2
+numba==0.59.0
+pysam>=0.21.0
+biotite>=0.37.0
+pyranges>=0.0.127
+tqdm==4.67.1
