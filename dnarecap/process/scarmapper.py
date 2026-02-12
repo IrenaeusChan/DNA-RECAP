@@ -100,7 +100,7 @@ def indel_scars(variant, fasta):
         # Double check with John about this...
         # it could only happen from 5'-->3'... by allowing query2, we assume that the mutation could happen on either strand.
 
-        while left_not_found and rt_position > lower_limit:
+        while left_not_found and rt_position > lower_limit and lft_position >= 0 and lft_position < rt_position:
             target_segment = refseq.fetch(variant.chrom, lft_position, rt_position).upper()
             if lft_query1 == target_segment:
                 lft_template = target_segment
@@ -114,7 +114,7 @@ def indel_scars(variant, fasta):
         lft_position = variant.pos
         rt_position = min(chrom_length, variant.pos + len(insertion))
 
-        while right_not_found and lft_position < upper_limit:
+        while right_not_found and lft_position < upper_limit and rt_position <= chrom_length and lft_position < rt_position:
             target_segment = refseq.fetch(variant.chrom, lft_position, rt_position).upper()
             
             if rt_query1 == target_segment:
@@ -130,7 +130,7 @@ def indel_scars(variant, fasta):
         lft_position = max(0, variant.pos-len(insertion))
         rt_position = variant.pos
 
-        while possible_left_not_found and rt_position > lower_limit:
+        while possible_left_not_found and rt_position > lower_limit and lft_position >= 0 and lft_position < rt_position:
             target_segment = refseq.fetch(variant.chrom, lft_position, rt_position).upper()
             if lft_query2 == target_segment:
                 lft_pos_template = tools.revcomp(target_segment)
@@ -142,8 +142,8 @@ def indel_scars(variant, fasta):
 
         lft_position = variant.pos
         rt_position = min(chrom_length, variant.pos + len(insertion))
-        
-        while possible_right_not_found and lft_position < upper_limit:
+
+        while possible_right_not_found and lft_position < upper_limit and rt_position <= chrom_length and lft_position < rt_position:
             target_segment = refseq.fetch(variant.chrom, lft_position, rt_position).upper()
             if rt_query2 == target_segment:
                 rt_pos_template = tools.revcomp(target_segment)
