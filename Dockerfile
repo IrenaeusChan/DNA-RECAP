@@ -31,7 +31,8 @@ RUN apt-get update -qq \
     && rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip and install packages
-RUN pip install --upgrade pip setuptools wheel
+RUN pip install --upgrade pip \
+    && pip install "setuptools<70" wheel
 
 # Install scientific stack
 RUN pip install --no-cache-dir \
@@ -41,6 +42,7 @@ RUN pip install --no-cache-dir \
     numpy \
     pandas \
     pysam \
-    click
+    click \
+    pyranges
 
 RUN pip install --upgrade git+https://github.com/IrenaeusChan/DNA-RECAP.git

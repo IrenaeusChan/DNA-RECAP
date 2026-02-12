@@ -12,6 +12,7 @@ def indel_scars(variant, fasta):
     4. Adapted from Dennis Simpson ScarMapper: https://pubmed.ncbi.nlm.nih.gov/33963863/ found here: https://github.com/Gaorav-Gupta-Lab/ScarMapper/
     """
     refseq = pysam.FastaFile(fasta)
+    chrom_length = refseq.get_reference_length(variant.chrom)
     # Classify INDEL Type and get length
     if len(variant.ref) > 1:
         indel_type = 'Del'
@@ -19,6 +20,18 @@ def indel_scars(variant, fasta):
     else:
         indel_type = 'Ins'
         indel_length = len(variant.alt)
+
+    # Bounds checking for target sequence fetching
+    left_start = max(0, variant.pos - indel_length)
+    left_end = variant.pos
+    right_start = variant.pos + indel_length
+    right_end = min(chrom_length, variant.pos + indel_length * 2)
+    
+    # Get the target sequence with bounds checking
+    if left_start >= left_end or right_start >= right_end:
+        log.logit(f"Warning: Invalid coordinates for variant {variant.chrom}:{variant.pos}")
+        refseq.close()
+        return "", "", "", None, None
 
     # Get the target sequence
     right_target = refseq.fetch(variant.chrom, variant.pos+indel_length, variant.pos+indel_length*2).upper()
@@ -61,8 +74,9 @@ def indel_scars(variant, fasta):
         rt_query2 = tools.revcomp(insertion[-5:])          # Reverse complement of the last 5 bp
         
         search_space = 50 #(15+len(insertion))    # <-- This search space is currently subjective
-        lower_limit = variant.pos-search_space
-        upper_limit = variant.pos+search_space
+        lower_limit = max(0, variant.pos - search_space)  # Prevent negative coordinates
+        upper_limit = min(chrom_length, variant.pos + search_space)  # Prevent exceeding chromosome
+        
         left_not_found = True
         right_not_found = True
         possible_left_not_found = True
@@ -71,7 +85,7 @@ def indel_scars(variant, fasta):
         rt_template = ""
 
         # Set starting positions and search for left template
-        lft_position = variant.pos-len(insertion)
+        lft_position = max(0, variant.pos-len(insertion))
         rt_position = variant.pos
 
         # If it's the left side... it should ONLY be the reverse complement
@@ -98,7 +112,8 @@ def indel_scars(variant, fasta):
 
         # Reset starting positions and search for right template
         lft_position = variant.pos
-        rt_position = variant.pos+len(insertion)
+        rt_position = min(chrom_length, variant.pos + len(insertion))
+
         while right_not_found and lft_position < upper_limit:
             target_segment = refseq.fetch(variant.chrom, lft_position, rt_position).upper()
             
@@ -112,8 +127,9 @@ def indel_scars(variant, fasta):
 
         # Since we don't know if 3'-->5' can happen
         # Keep track just in case we need to check for it.
-        lft_position = variant.pos-len(insertion)
+        lft_position = max(0, variant.pos-len(insertion))
         rt_position = variant.pos
+
         while possible_left_not_found and rt_position > lower_limit:
             target_segment = refseq.fetch(variant.chrom, lft_position, rt_position).upper()
             if lft_query2 == target_segment:
@@ -125,7 +141,8 @@ def indel_scars(variant, fasta):
             rt_position -= 1
 
         lft_position = variant.pos
-        rt_position = variant.pos+len(insertion)
+        rt_position = min(chrom_length, variant.pos + len(insertion))
+        
         while possible_right_not_found and lft_position < upper_limit:
             target_segment = refseq.fetch(variant.chrom, lft_position, rt_position).upper()
             if rt_query2 == target_segment:

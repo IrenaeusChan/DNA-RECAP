@@ -212,7 +212,6 @@ def process_breaks(bam_file, control_bam_file, merged_df, fasta, window, distanc
 
     # Combine results from all processes
     breaks = pd.concat(results, ignore_index=True)
-    
     breaks['control_alt_counts'] = 0
     breaks['control_total_counts'] = 0
     # Now we need to get control counts for each INDEL/BND, let's split this by source to speed it up

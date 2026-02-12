@@ -247,7 +247,8 @@ def add_normal_counts(df, control_bam_file, fasta, chrom, start, end, window, ve
     if len(df) == 0:
         return df
     
-    # Filter out REF variants
+    # Store REF variants separately and remove them from processing
+    ref_df = df[df['type'] == 'REF'].copy()
     df = df[df['type'] != 'REF'].copy()
     if len(df) == 0:
         return df
@@ -347,6 +348,12 @@ def add_normal_counts(df, control_bam_file, fasta, chrom, start, end, window, ve
 
     control.close()
     ref_fasta.close()
+
+    # Add REF variants back to the DataFrame
+    if len(ref_df) > 0:
+        ref_df['control_alt_counts'] = 0
+        ref_df['control_total_counts'] = len(set(r.query_name for r in quality_reads))
+        df = pd.concat([df, ref_df], ignore_index=True)
 
     return df.copy()
 
@@ -451,11 +458,35 @@ def summarise_repaired_reads(breaks, summary_outfile, input):
     bnd_keys = ';'.join(bnds['key'].tolist()) if len(bnds) > 0 else '.'
 
     # Create the One Line Summary
-    out_string=f"{input['Chromosome']}\t{input['Start']}\t{input['End']}\t{';'.join([ str(x) for x in input['pam_site'] ])}\t{total_reads}\t{repaired_reads}\t{repaired_fraction}\t{control_total_reads}\t{control_repaired_reads}\t{control_repaired_fraction}\t{indel_count}\t{indel_keys}\t{bnd_count}\t{bnd_keys}\t{offtargetsites}\t{ontarget}\t\
-        {num_indel_nhej}\t{num_indel_tmej}\t{num_indel_nmh_ej}\t{num_indel_other}\t{num_indel_complex}\t{indel_nhej_fraction}\t{indel_tmej_fraction}\t{indel_nmh_ej_fraction}\t{indel_other_fraction}\t{indel_complex_fraction}\t\
-        {num_ins_nhej}\t{num_ins_tins}\t{num_ins_nmh_ej}\t{num_ins_other}\t{indel_ins_nhej_fraction}\t{indel_ins_tins_fraction}\t{indel_ins_nmh_ej_fraction}\t{indel_ins_other_fraction}\t\
-        {num_del_nhej}\t{num_del_tmej}\t{num_del_nmh_ej}\t{num_del_other}\t{indel_del_nhej_fraction}\t{indel_del_tmej_fraction}\t{indel_del_nmh_ej_fraction}\t{indel_del_other_fraction}\t\
-        {num_bnd_tmej}\t{num_bnd_nmh_ej}\t{num_bnd_other}\t{bnd_tmej_fraction}\t{bnd_nmh_ej_fraction}\t{bnd_other_fraction}"
+    output_fields = [
+        # Basic interval information
+        input['Chromosome'], input['Start'], input['End'], ';'.join([str(x) for x in input['pam_site']]),
+        
+        # Overall read counts
+        total_reads, repaired_reads, repaired_fraction, 
+        control_total_reads, control_repaired_reads, control_repaired_fraction,
+        
+        # Variant summary
+        indel_count, indel_keys, bnd_count, bnd_keys, offtargetsites, ontarget,
+        
+        # Overall INDEL classifications (counts and fractions)
+        num_indel_nhej, num_indel_tmej, num_indel_nmh_ej, num_indel_other, num_indel_complex,
+        indel_nhej_fraction, indel_tmej_fraction, indel_nmh_ej_fraction, indel_other_fraction, indel_complex_fraction,
+        
+        # Insertion classifications
+        num_ins_nhej, num_ins_tins, num_ins_nmh_ej, num_ins_other,
+        indel_ins_nhej_fraction, indel_ins_tins_fraction, indel_ins_nmh_ej_fraction, indel_ins_other_fraction,
+        
+        # Deletion classifications
+        num_del_nhej, num_del_tmej, num_del_nmh_ej, num_del_other,
+        indel_del_nhej_fraction, indel_del_tmej_fraction, indel_del_nmh_ej_fraction, indel_del_other_fraction,
+        
+        # BND classifications
+        num_bnd_tmej, num_bnd_nmh_ej, num_bnd_other,
+        bnd_tmej_fraction, bnd_nmh_ej_fraction, bnd_other_fraction
+    ]
+
+    out_string = '\t'.join(str(field) for field in output_fields)
     open(summary_outfile, 'a').write(out_string + "\n")
 
 def process_time(total_elapsed):
