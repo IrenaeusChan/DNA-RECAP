@@ -263,6 +263,7 @@ def process_breaks(bam_file, control_bam_file, merged_df, fasta, window, distanc
     return breaks
 
 def process_vcf(vcf_file, sample_name, has_control, control_sample_name, fasta, chromosome, minreads, maxcontrol, ignore_filters, threads, verbose, outfile):
+    log.logit(f"Reading VCF file {vcf_file}")
     # Read in VCF file
     input_vcf = pysam.VariantFile(vcf_file)
     # Check if VCF is indexed
@@ -313,6 +314,7 @@ def process_vcf(vcf_file, sample_name, has_control, control_sample_name, fasta, 
 
     variants_df = pd.DataFrame(columns=['variant', 'source', 'chrom', 'pos', 'ref', 'alt', 'type', 'indel_type', 'sample_alt_counts', 'sample_total_counts', 'control_alt_counts', 'control_total_counts', 'classification', 'mh', 'mh_length', 'lft_tmplt', 'rt_tmplt', 'lft_tmplt_pos', 'rt_tmplt_pos'])
 
+    log.logit(f"Processing VCF file {vcf_file} for sample {sample_name} with control sample {control_sample_name if has_control else 'N/A'}")
     for variant in variants:
         key = f"{variant.chrom}:{variant.pos}:{variant.ref}:{variant.alts[0]}"
         # If --ignore_filters flag is set, ignore filters and process all variants. If not set, only process variants that PASS filters (i.e. FILTER column is 'PASS')
@@ -374,11 +376,67 @@ def process_vcf(vcf_file, sample_name, has_control, control_sample_name, fasta, 
             variants_df = pd.concat([variants_df, pd.DataFrame([variant_data])], ignore_index=True)
     input_vcf.close()
     
+    log.logit(f"Annotating variants with microhomology and classification using ScarMapper")
     df_with_scars = scarmapper.run_scarmapper(variants_df, fasta)
     df_with_scars['mh_length'] = df_with_scars['mh'].apply(lambda x: len(x) if x != '' else 0)
     df_with_scars['key'] = df_with_scars.apply(lambda row: f"{row['variant']}:{row['classification']}", axis=1)
     df_with_scars.to_csv(outfile, sep='\t', index=False)
     
+    log.logit(f"Annotating original VCF file {vcf_file} with microhomology and classification information from ScarMapper")
     tools.annotate_vcf_with_scars(vcf_file, df_with_scars, chromosome, outfile)
+
+    return df_with_scars
+
+def process_csv(csv_file, fasta, chromosome, threads, verbose, outfile):
+    # Check to see if the file is gzipped
+    log.logit(f"Reading CSV file {csv_file}")
+    if csv_file.endswith('.gz'):
+        with gzip.open(csv_file, 'rt') as f:
+            # Check to see if it is CSV or TSV first
+            if csv_file.endswith('.tsv.gz'):
+                df = pd.read_csv(f, sep='\t')
+            else:
+                df = pd.read_csv(f)
+    else:
+        # Check to see if it is CSV or TSV first
+        if csv_file.endswith('.tsv'):
+            df = pd.read_csv(csv_file, sep='\t')
+        else:
+            df = pd.read_csv(csv_file)
+    # Check if required columns are present
+    required_columns = {'chrom', 'pos', 'ref', 'alt'}
+    # Normalize column names to lowercase for case-insensitive comparison
+    original_header = set(df.columns)
+    df.columns = df.columns.str.lower()
+    available_columns = set(df.columns.str.lower())
+    if not required_columns.issubset(available_columns):
+        missing_columns = required_columns - available_columns
+        log.logit(f"ERROR: CSV file {csv_file} is missing required columns. Missing columns: {missing_columns}. Required columns are: {required_columns}. Please check your CSV file and try again.", color = "red")
+        sys.exit(1)
+
+    # Filter by chromosome if specified
+    if chromosome is not None:
+        df = df[df['chrom'] == chromosome]
+
+    # Identify the type of variant (REF or INDEL) based on the ref and alt columns, if type column is not already present
+    if 'type' not in df.columns:
+        df['type'] = df.apply(lambda row: tools.classify_variant_type(row['ref'], row['alt']), axis=1)
+
+    log.logit(f"Annotating variants with microhomology and classification using ScarMapper")
+    results = []
+    if threads == 1:
+        df_with_scars = scarmapper.run_scarmapper(df, fasta)
+        df_with_scars['mh_length'] = df_with_scars['mh'].apply(lambda x: len(x) if pd.notna(x) and x != '' else 0)
+    else:
+        # For multithreading, we will split the dataframe into chromosome chunks and run scarmapper on each chunk in parallel, then combine the results
+        chroms = df['chrom'].unique()
+        chrom_dfs = [df[df['chrom'] == chrom] for chrom in chroms]
+        with mp.Pool(processes=threads) as pool:
+            results = pool.starmap(scarmapper.run_scarmapper, [(chrom_df, fasta) for chrom_df in chrom_dfs])
+        df_with_scars = pd.concat(results, ignore_index=True)
+        df_with_scars['mh_length'] = df_with_scars['mh'].apply(lambda x: len(x) if pd.notna(x) and x != '' else 0) 
+
+    log.logit(f"Annotating original CSV file {csv_file} with microhomology and classification information from ScarMapper")
+    tools.annotate_csv_with_scars(csv_file, df_with_scars, chromosome, outfile)
 
     return df_with_scars

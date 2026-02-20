@@ -50,11 +50,22 @@ def process_indels(bam_file, control_bam_file, input_file, fasta, window, distan
     merged_df = tools.process_input_file(input_file, window, chromosome, verbose)
     break_results = process.process_breaks(bam_file, control_bam_file, merged_df, fasta, window, distance, minreads, maxcontrol, threads, verbose, outfile)
     outfile_summary = outfile.replace('.tsv', '.summary.tsv')
-    open(outfile_summary, 'w').write("chrom\tstart\tend\tpam_positions\ttotal_reads\trepaired_reads\trepaired_fraction\tcontrol_reads\tcontrol_repaired_reads\tcontrol_repaired_fraction\tindel_count\tindel_info\tbnd_count\tbnd_info\ttarget_info\tis_target\t\
-                                     num_indel_nhej\tnum_indel_tmej\tnum_indel_nmh_ej\tnum_indel_other\tnum_indel_complex\tindel_nhej_fraction\tindel_tmej_fraction\tindel_nmh_ej_fraction\tindel_other_fraction\tindel_complex_fraction\t\
-                                     num_ins_nhej\tnum_ins_tins\tnum_ins_nmh_ej\tnum_ins_other\tindel_ins_nhej_fraction\tindel_ins_tins_fraction\tindel_ins_nmh_ej_fraction\tindel_ins_other_fraction\t\
-                                     num_del_nhej\tnum_del_tmej\tnum_del_nmh_ej\tnum_del_other\tindel_del_nhej_fraction\tindel_del_tmej_fraction\tindel_del_nmh_ej_fraction\tindel_del_other_fraction\t\
-                                     num_bnd_tmej\tnum_bnd_nmh_ej\tnum_bnd_other\tbnd_tmej_fraction\tbnd_nmh_ej_fraction\tbnd_other_fraction\n")
+    header_columns = [
+        'chrom', 'start', 'end', 'pam_positions',
+        'total_reads', 'repaired_reads', 'repaired_fraction',
+        'control_reads', 'control_repaired_reads', 'control_repaired_fraction',
+        'indel_count', 'indel_info', 'bnd_count', 'bnd_info', 'target_info', 'is_target',
+        'num_indel_nhej', 'num_indel_tmej', 'num_indel_nmh_ej', 'num_indel_other', 'num_indel_complex',
+        'indel_nhej_fraction', 'indel_tmej_fraction', 'indel_nmh_ej_fraction', 'indel_other_fraction', 'indel_complex_fraction',
+        'num_ins_nhej', 'num_ins_tins', 'num_ins_nmh_ej', 'num_ins_other',
+        'indel_ins_nhej_fraction', 'indel_ins_tins_fraction', 'indel_ins_nmh_ej_fraction', 'indel_ins_other_fraction',
+        'num_del_nhej', 'num_del_tmej', 'num_del_nmh_ej', 'num_del_other',
+        'indel_del_nhej_fraction', 'indel_del_tmej_fraction', 'indel_del_nmh_ej_fraction', 'indel_del_other_fraction',
+        'num_bnd_tmej', 'num_bnd_nmh_ej', 'num_bnd_other',
+        'bnd_tmej_fraction', 'bnd_nmh_ej_fraction', 'bnd_other_fraction'
+    ]
+    with open(outfile_summary, 'w') as f:
+        f.write('\t'.join(header_columns) + '\n')
     for index, row in merged_df.iterrows():
         source = ';'.join(row['guide_name']) if isinstance(row['guide_name'], list) else row['guide_name']
         tools.summarise_repaired_reads(break_results[(break_results['source'] == source)], outfile.replace('.tsv', '.summary.tsv'), row)
@@ -83,8 +94,33 @@ def process_vcf(vcf_file, sample_name, has_control, control_sample_name, fasta, 
     import dnarecap.utils.tools as tools
     start_time = time.time()
     puts(colored.green("Processing VCF file to add Repair Event Classification..."))
+    if outfile is None:
+        outfile = vcf_file.replace('.vcf', '.dna_recap.vcf').replace('.vcf.gz', '.dna_recap.vcf.gz')
     vcf_df = process.process_vcf(vcf_file, sample_name, has_control, control_sample_name, fasta, chromosome, minreads, maxcontrol, ignore_filters, threads, verbose, outfile)
     
     puts(colored.green("Finished processing VCF file."))
+    total_elapsed = tools.process_time(time.time() - start_time)
+    puts(colored.green(f"Total time elapsed: {total_elapsed}."))
+
+@process.command('csv', short_help="Adds Repair Event Classification to CSV files that contain variant information (e.g. CHROM, POS, REF, ALT)")
+@click.option('--csv_file', '-i', type=click.Path(exists=True), required=True, help="Input CSV/TSV file")
+@click.option('--fasta', '-f', type=click.Path(exists=True), required=True, help="Reference fasta file")
+@click.option('--chromosome', '-c', type=str, default=None, help="Chromosome to process.")
+@click.option('--threads', '-t', type=int, default=1, show_default=True, help="Number of threads/cores to use for multiprocessing.")
+@click.option('--verbose', '-v', is_flag=True, show_default=True, default=False, help="Print verbose output")
+@click.option('--outfile', '-o', type=click.Path(), required=True, default=None, help="Output TSV file with added Repair Event Classification")
+def process_csv(csv_file, fasta, chromosome, threads, verbose, outfile):
+    """
+    Process CSV files to add Repair Event Classification
+    """
+    from dnarecap.process import process
+    import dnarecap.utils.tools as tools
+    start_time = time.time()
+    puts(colored.green("Processing CSV file to add Repair Event Classification..."))
+    if outfile is None:
+        outfile = csv_file.replace('.csv', '.dna_recap.csv').replace('.tsv', '.dna_recap.tsv').replace('csv.gz', 'dna_recap.csv.gz').replace('tsv.gz', 'dna_recap.tsv.gz')
+    csv_df = process.process_csv(csv_file, fasta, chromosome, threads, verbose, outfile)
+    
+    puts(colored.green("Finished processing CSV file."))
     total_elapsed = tools.process_time(time.time() - start_time)
     puts(colored.green(f"Total time elapsed: {total_elapsed}."))

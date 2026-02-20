@@ -12,7 +12,12 @@ def indel_scars(variant, fasta):
     4. Adapted from Dennis Simpson ScarMapper: https://pubmed.ncbi.nlm.nih.gov/33963863/ found here: https://github.com/Gaorav-Gupta-Lab/ScarMapper/
     """
     refseq = pysam.FastaFile(fasta)
-    chrom_length = refseq.get_reference_length(variant.chrom)
+    try:
+        chrom_length = refseq.get_reference_length(variant.chrom)
+    except KeyError:
+        log.logit(f"Warning: Chromosome {variant.chrom} not found in reference")
+        refseq.close()
+        return "", "", "", None, None
     # Classify INDEL Type and get length
     if len(variant.ref) > 1:
         indel_type = 'Del'
@@ -198,6 +203,15 @@ def run_scarmapper(df, fasta):
             # Classify the INDEL
             df.at[it, 'indel_type'] = indel_type
             df.at[it, 'classification'] = classify_indel(indel_type,0,microhomology,"","")
+
+        elif row['type'] == 'SNV':
+            df.at[it, 'mh'] = ''
+            df.at[it, 'lft_tmplt'] = ''
+            df.at[it, 'rt_tmplt'] = ''
+            df.at[it, 'lft_tmplt_pos'] = None
+            df.at[it, 'rt_tmplt_pos'] = None
+            df.at[it, 'indel_type'] = ''
+            df.at[it, 'classification'] = ''
 
     return df.copy()
 

@@ -195,6 +195,22 @@ def quick_cigar_check(read, variant_ref, variant_alt):
     
     return True  # For other cases, allow through
 
+def classify_variant_type(ref, alt):
+    # Handle missing or invalid data
+    if pd.isna(ref) or pd.isna(alt) or ref == '' or alt == '':
+        return 'UNKNOWN'
+    
+    ref = str(ref).upper()
+    alt = str(alt).upper()
+    
+    # REF call (no variant)
+    if ref == alt or alt == '.':
+        return 'REF'  
+    elif len(ref) == 1 and len(alt) == 1:
+        return 'SNV'
+    
+    return 'INDEL'
+
 def batch_align_reads(df, read_variant_pairs, alignment_matrix, gap_penalty):
     """Process alignments in batches to reduce object creation overhead"""
     results = []
@@ -572,3 +588,49 @@ def annotate_vcf_with_scars(vcf_file, df_with_scars, chromosome, outfile):
     vcf_out.close()
 
     log.logit(f"Annotated VCF written to {output_vcf}")
+
+def annotate_csv_with_scars(csv_file, df_with_scars, chromosome, outfile):
+    """
+    Annotate CSV file with scar information from the DataFrame.
+    """
+    df_csv = pd.read_csv(csv_file)
+    # Initialize new columns with default values
+    df_csv['classification'] = ''
+    df_csv['mh'] = ''
+    df_csv['lft_tmplt'] = ''
+    df_csv['rt_tmplt'] = ''
+
+    # Create lookup dictionary from scarmapper results
+    scar_lookup = {}
+    for _, row in df_with_scars.iterrows():
+        key = f"{row['chrom']}:{row['pos']}:{row['ref']}:{row['alt']}"
+        scar_lookup[key] = {
+            'classification': row['classification'],
+            'mh': '' if (row['mh'] == '' or row['mh'] is None) else row['mh'],
+            'lft_tmplt': '' if (row['lft_tmplt'] == '' or row['lft_tmplt'] is None) else row['lft_tmplt'],
+            'rt_tmplt': '' if (row['rt_tmplt'] == '' or row['rt_tmplt'] is None) else row['rt_tmplt']
+        }
+
+    # CHROM, POS, REF, ALT can be upper or lower case, so we standardize to lower case for the key
+    column_map = {}
+    for col in df_csv.columns:
+        column_map[col.lower()] = col
+    chrom_col = column_map['chrom']
+    pos_col = column_map['pos'] 
+    ref_col = column_map['ref']
+    alt_col = column_map['alt']    
+
+    for idx, row in df_csv.iterrows():
+        key = f"{str(row[chrom_col]).lower()}:{row[pos_col]}:{str(row[ref_col])}:{str(row[alt_col])}"
+        if key in scar_lookup:
+            df_csv.at[idx, 'classification'] = scar_lookup[key]['classification']
+            if "TMEJ" in scar_lookup[key]['classification']:
+                df_csv.at[idx, 'mh'] = scar_lookup[key]['mh']
+            elif "TINS" in scar_lookup[key]['classification']:
+                if scar_lookup[key]['lft_tmplt'] != '':
+                    df_csv.at[idx, 'lft_tmplt'] = scar_lookup[key]['lft_tmplt']
+                if scar_lookup[key]['rt_tmplt'] != '':
+                    df_csv.at[idx, 'rt_tmplt'] = scar_lookup[key]['rt_tmplt']
+
+    df_csv.to_csv(outfile, index=False)
+    log.logit(f"Annotated CSV written to {outfile}")
