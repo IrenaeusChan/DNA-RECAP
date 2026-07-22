@@ -22,7 +22,7 @@ def create_variant_key(row):
         return f"{row['chrom']}:{row['pos']}:{row['ref']}:{row['alt']}:{row['counts']}:{row['control_alt_counts']}:{row['Distance']}:{row['mh_length']}:{row['classification']}"
 
 # Adapted from Dr. Dave Spencer
-def process_regions(bam_file, fasta, source, chrom, start, end, pam_site, window, distance, minreads, maxcontrol, verbose=False):
+def process_regions(bam_file, fasta, source, chrom, start, end, pam_site, pam_sequence, hr_mutation, window, distance, minreads, maxcontrol, verbose=False):
     """
     Process a BAM file to identify INDELs/BNDs within a specified genomic interval.
     """
@@ -37,9 +37,9 @@ def process_regions(bam_file, fasta, source, chrom, start, end, pam_site, window
     maxNM = 5
     minSecMapQual = 10
 
-    # Initialize empty DataFrame to store read alignments
-    indels_df = pd.DataFrame(columns=['source', 'read', 'chrom', 'pos', 'ref', 'alt', 'strands', 'type'])
-    bnds_df = pd.DataFrame(columns=['source','read','chrom','pos','chrom2','pos2','strands','type'])
+    # Accumulate records in Python lists and build DataFrames once at the end.
+    indel_records = []
+    bnd_records = []
 
     # Grab reference sequence for region +/- svDistanceThreshold
     regionStart = max(start - svDistanceThreshold, 1)
@@ -95,37 +95,61 @@ def process_regions(bam_file, fasta, source, chrom, start, end, pam_site, window
 
             # There are multiple cigar operations bookened by matches, then process an indel                
             if len(cigar) > 1:
+                if read.query_name == "consensus_read_CATGGTCGC_2_40174777_2_40175108_1":
+                    print(f"Processing INDEL read {read.query_name} with cigar {cigar}")
                 cigar, read_reference_start, read_reference_end, read_query_start, read_query_end = indels.trim_cigar_ends(cigar, read_reference_start, read_reference_end, read_query_start, read_query_end)
                 # Initialize indelinfo and bndinfo
                 indelinfo = indels.read_to_indelinfo(read, cigar, regionSeq, regionStart, read_reference_start, read_query_start, verbose)
-                indels_df = pd.concat([indels_df, pd.DataFrame([indelinfo])], ignore_index=True)
+                indel_records.append(indelinfo)
             # If the read has a supplementary alignment and soft clipping, process as BND
             elif read.has_tag('SA') is True and (leftSoftClip > 0 or rightSoftClip > 0):
                 bndinfo = bnds.read_to_bndinfo(read, read_strand, start, end, read_reference_start, read_reference_end, leftSoftClip, rightSoftClip, ref_fasta, maxNM, svDistanceThreshold, minSecMapQual, verbose)
                 if bndinfo is not None:
-                    bnds_df = pd.concat([bnds_df, pd.DataFrame([bndinfo])], ignore_index=True)
+                    bnd_records.append(bndinfo)
                 else:
                     log.logit(f"Read {read.query_name} has SA tag but did not meet criteria for BND, skipping")
             # If no indels but read overlaps region, mark as REF, these are reads without indication of "damage"
-            elif read_reference_start < end and read_reference_end > start:
-                indelinfo = {'source':'',
-                    'read': read.query_name,
-                    'chrom': chrom,
-                    'pos': start,
-                    'whichread': 'r1' if read.is_read1 else 'r2',
-                    'strands': '',
-                    'ref':'.',
-                    'alt':'.',
-                    'type':'REF',
-                    'mh':'',
-                    'mh_length': 0,
-                    'lft_tmplt':'',
-                    'rt_tmplt':'',
-                    'classification':''}
-                indels_df = pd.concat([indels_df, pd.DataFrame([indelinfo])], ignore_index=True)
-
+            # However, we still need to grab the ref and alt sequence for the read, so we can explore the sequence context of the read and see if there are any microhomology or other features that may be relevant to the read
+            elif read_reference_start < end and read_reference_end > start:     
+                # start here represents the PAM site position -1           
+                hr_template_check_seq = read.query_sequence[read_query_start + (start+1 - read_reference_start):read_query_start + (start+1 - read_reference_start) + 3]
+                if hr_template_check_seq == hr_mutation[0]:    # PAM Site should be for example AGG, but we mutate it to be TTT, if the read has the TTT, then we know it is a read that has been repaired with the HR template
+                    indelinfo = {'source':'',
+                        'read': read.query_name,
+                        'chrom': chrom,
+                        'pos': start,
+                        'whichread': 'r1' if read.is_read1 else 'r2',
+                        'strands': read_strand,
+                        'ref':pam_sequence[0],
+                        'alt':hr_template_check_seq,
+                        'type':'HR',
+                        'mh':'',
+                        'mh_length': 0,
+                        'lft_tmplt':'',
+                        'rt_tmplt':'',
+                        'classification':''}
+                    indel_records.append(indelinfo)
+                else:                    
+                    indelinfo = {'source':'',
+                        'read': read.query_name,
+                        'chrom': chrom,
+                        'pos': start,
+                        'whichread': 'r1' if read.is_read1 else 'r2',
+                        'strands': '',
+                        'ref':'.',
+                        'alt':'.',
+                        'type':'REF',
+                        'mh':'',
+                        'mh_length': 0,
+                        'lft_tmplt':'',
+                        'rt_tmplt':'',
+                        'classification':''}
+                    indel_records.append(indelinfo)
             else:
                 continue
+
+    indels_df = pd.DataFrame(indel_records)
+    bnds_df = pd.DataFrame(bnd_records)
 
     log.logit(f"Summarizing INDELs from reads")
     if verbose: log.logit(f"Total reads processed in region: {len(indels_df)}")
@@ -184,6 +208,7 @@ def process_regions(bam_file, fasta, source, chrom, start, end, pam_site, window
     else:
         combined = pd.concat([indels_df, bnds_df], ignore_index=True, sort=False)
 
+    log.logit(f"Found {len(combined[combined['type'] == 'HR'])} HR calls")
     log.logit(f"Found {len(combined[combined['type'] == 'REF'])} REF calls")
     log.logit(f"Found {len(combined[combined['type'] == 'INDEL'])} INDELs")
     log.logit(f"Found {len(combined[combined['type'] == 'BND'])} BNDs")
@@ -195,7 +220,7 @@ def process_breaks(bam_file, control_bam_file, merged_df, fasta, window, distanc
         # Single-threaded processing
         for index, row in merged_df.iterrows():
             guide_name = ';'.join(row['guide_name']) if isinstance(row['guide_name'], list) else row['guide_name']
-            result = process_regions(bam_file, fasta, guide_name, row['Chromosome'], row['Start'], row['End'], row['pam_site'], window, distance, minreads, maxcontrol, verbose)
+            result = process_regions(bam_file, fasta, guide_name, row['Chromosome'], row['Start'], row['End'], row['pam_site'], row['PAM'], row['HR_mutation'], window, distance, minreads, maxcontrol, verbose)
             results.append(result)
     else:
         # Set up multiprocessing pool, if threads > 1
@@ -205,7 +230,7 @@ def process_breaks(bam_file, control_bam_file, merged_df, fasta, window, distanc
             results = pool.starmap(process_regions, [
                 (bam_file, fasta, 
                  ';'.join(row['guide_name']) if isinstance(row['guide_name'], list) else row['guide_name'], 
-                 row['Chromosome'], row['Start'], row['End'], row['pam_site'], 
+                 row['Chromosome'], row['Start'], row['End'], row['pam_site'], row['PAM'], row['HR_mutation'],
                  window, distance, minreads, maxcontrol, verbose) 
                 for index, row in merged_df.iterrows()
             ])
@@ -312,7 +337,7 @@ def process_vcf(vcf_file, sample_name, has_control, control_sample_name, fasta, 
     else:
         sample_index = sample_names.index(sample_name)
 
-    variants_df = pd.DataFrame(columns=['variant', 'source', 'chrom', 'pos', 'ref', 'alt', 'type', 'indel_type', 'sample_alt_counts', 'sample_total_counts', 'control_alt_counts', 'control_total_counts', 'classification', 'mh', 'mh_length', 'lft_tmplt', 'rt_tmplt', 'lft_tmplt_pos', 'rt_tmplt_pos'])
+    variant_records = []
 
     log.logit(f"Processing VCF file {vcf_file} for sample {sample_name} with control sample {control_sample_name if has_control else 'N/A'}")
     for variant in variants:
@@ -373,8 +398,10 @@ def process_vcf(vcf_file, sample_name, has_control, control_sample_name, fasta, 
                 'rt_tmplt_pos': ''
             }
 
-            variants_df = pd.concat([variants_df, pd.DataFrame([variant_data])], ignore_index=True)
+            variant_records.append(variant_data)
     input_vcf.close()
+
+    variants_df = pd.DataFrame(variant_records)
     
     log.logit(f"Annotating variants with microhomology and classification using ScarMapper")
     df_with_scars = scarmapper.run_scarmapper(variants_df, fasta)

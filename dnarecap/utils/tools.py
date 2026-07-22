@@ -17,17 +17,21 @@ def process_input_file(input_file, window, chromosome, verbose=False):
     input_df['End'] = input_df['pam_site']
     input_df['Start'] = input_df['pam_site'] - 1
     input_df['guide_name'] = input_df['guide_name'].astype(str)
-    input_df['info'] = input_df.apply(lambda row: f"{row['guide_name']},{row['target_sequence']},{row['PAM']},{row['Chromosome']},{row['pam_site']},{row['strand']}", axis=1)
+    input_df['PAM'] = input_df['PAM'].astype(str)
+    input_df['HR_mutation'] = input_df['HR_mutation'].astype(str)
+    input_df['info'] = input_df.apply(lambda row: f"{row['guide_name']},{row['target_sequence']},{row['Chromosome']},{row['pam_site']},{row['strand']}", axis=1)
     input_df['ontarget'] = input_df['on_target'] # This can be used because our multiguide RNA can have multiple off-target regions
 
     # make pyranges object
-    input_pr = pr.PyRanges(input_df[['Chromosome','Start','End','guide_name','pam_site','info','ontarget']])
+    input_pr = pr.PyRanges(input_df[['Chromosome','Start','End','guide_name','pam_site','PAM','HR_mutation','info','ontarget']])
 
     # Cluster the intervals
     input_pr = input_pr.cluster(slack=window)
     merged_pr = input_pr.merge(by='Cluster', strand=False, slack=window)
     merged_df = merged_pr.df.join(input_pr.df.groupby('Cluster')['guide_name'].agg(list).reset_index().set_index('Cluster'),on='Cluster',how='left')
     merged_df = merged_df.join(input_pr.df.groupby('Cluster')['pam_site'].agg(list).reset_index().set_index('Cluster'),on='Cluster',how='left')
+    merged_df = merged_df.join(input_pr.df.groupby('Cluster')['PAM'].agg(list).reset_index().set_index('Cluster'),on='Cluster',how='left')
+    merged_df = merged_df.join(input_pr.df.groupby('Cluster')['HR_mutation'].agg(list).reset_index().set_index('Cluster'),on='Cluster',how='left')
     merged_df = merged_df.join(input_pr.df.groupby('Cluster')['info'].agg(list).reset_index().set_index('Cluster'),on='Cluster',how='left')
     merged_df = merged_df.join(input_pr.df.groupby('Cluster')['ontarget'].agg(list).reset_index().set_index('Cluster'),on='Cluster',how='left')
 
@@ -167,14 +171,60 @@ def process_soft_clipping(read, cigar, leftSoftClip, rightSoftClip, read_strand,
 
     return cigar, leftSoftClip, rightSoftClip, read_reference_start, read_reference_end
 
+def _iter_cigar_events(read):
+    """Yield insertion and deletion events from a read's CIGAR in reference coordinates."""
+    if read.cigartuples is None:
+        return
+
+    ref_pos = read.reference_start
+    for op, length in read.cigartuples:
+        if op in (0, 7, 8):  # M, =, X
+            ref_pos += length
+        elif op == 2:  # D
+            yield ("D", ref_pos, ref_pos + length, length)
+            ref_pos += length
+        elif op == 1:  # I
+            yield ("I", ref_pos, ref_pos, length)
+
+def read_supports_variant(read, variant, position_slop=10, size_slop=2):
+    """Fast pre-filter to avoid aligning reads that cannot support the variant."""
+    if read.cigartuples is None:
+        return False
+
+    variant_type = variant.type
+    if variant_type == "BND":
+        return read.has_tag("SA")
+
+    variant_ref = str(variant.ref)
+    variant_alt = str(variant.alt)
+    expected_del_size = len(variant_ref) - len(variant_alt)
+    expected_ins_size = len(variant_alt) - len(variant_ref)
+
+    variant_start = int(variant.pos)
+    variant_end = variant_start + max(len(variant_ref), len(variant_alt))
+
+    for event_type, event_start, event_end, event_size in _iter_cigar_events(read):
+        if expected_del_size > 0 and event_type == "D":
+            if abs(event_size - expected_del_size) <= size_slop and (
+                event_start <= variant_end + position_slop
+                and event_end >= variant_start - position_slop
+            ):
+                return True
+
+        elif expected_ins_size > 0 and event_type == "I":
+            if abs(event_size - expected_ins_size) <= size_slop and abs(event_start - variant_start) <= position_slop:
+                return True
+
+    return expected_del_size <= 0 and expected_ins_size <= 0
+
 # Position-based filtering
 def get_read_variant_pairs(reads, variants):
+    variant_records = {row.Index: row for row in variants.itertuples()}
     pairs = []
     for read in reads:
-        for idx, variant in variants.iterrows():
-            # Check position overlap
-            if (read.reference_start <= variant.pos + len(variant.ref) + 50 and 
-                read.reference_end >= variant.pos - 50):
+        for idx, variant in variant_records.items():
+            if (read.reference_start <= variant.pos + len(variant.ref) + 50 and
+                read.reference_end >= variant.pos - 50) and read_supports_variant(read, variant):
                 pairs.append((read, idx))
     return pairs
 
@@ -213,13 +263,14 @@ def classify_variant_type(ref, alt):
 
 def batch_align_reads(df, read_variant_pairs, alignment_matrix, gap_penalty):
     """Process alignments in batches to reduce object creation overhead"""
+    variant_records = {row.Index: row for row in df.itertuples()}
     results = []
     
     # Pre-convert sequences to reduce repeated conversions
     sequence_cache = {}
     
     for read, variant_idx in tqdm(read_variant_pairs, desc="Aligning reads to variants", unit="pairs"):
-        variant = df.loc[variant_idx]
+        variant = variant_records[variant_idx]
         
         # Cache sequence objects, if the sequence already exists, reuse it
         if read.query_name not in sequence_cache:
@@ -237,7 +288,10 @@ def batch_align_reads(df, read_variant_pairs, alignment_matrix, gap_penalty):
         alt_seq = sequence_cache[alt_key]
         
         # Quick pre-screen
-        if not quick_cigar_check(read, variant.ref, variant.alt):
+        #if not quick_cigar_check(read, variant.ref, variant.alt):
+        #    continue
+        # Rather than checking if the read supports the variant based on CIGAR, we can use a more general check to see if the read could possibly support the variant based on position and type.
+        if not read_supports_variant(read, variant):
             continue
             
         # Perform alignments
@@ -266,6 +320,10 @@ def add_normal_counts(df, control_bam_file, fasta, chrom, start, end, window, ve
     # Store REF variants separately and remove them from processing
     ref_df = df[df['type'] == 'REF'].copy()
     df = df[df['type'] != 'REF'].copy()
+
+    # Store HR counts separately and remove them from processing
+    hr_df = df[df['type'] == 'HR'].copy()
+    df = df[df['type'] != 'HR'].copy()
     if len(df) == 0:
         return df
 
@@ -275,30 +333,41 @@ def add_normal_counts(df, control_bam_file, fasta, chrom, start, end, window, ve
     ref_fasta = pysam.FastaFile(fasta)
 
     # Make REF and ALT sequences for each INDEL/BND
-    df['refseq'] = ''
-    df['altseq'] = ''
-    
-    for it, row in df.iterrows():
-        #df.at[it,'refseq'] = ref_fasta.fetch(row['chrom'],row['pos']-1-flank,row['pos']+len(row['ref'])+flank)
-        refseq = ref_fasta.fetch(row['chrom'],row['pos']-1-flank,row['pos']+len(row['ref'])+flank)
-        df.at[it,'refseq'] = refseq
-        
-        if row['type'] in ['INDEL','DEL','INS']:
-            #df.at[it,'altseq'] = ref_fasta.fetch(row['chrom'],row['pos']-1-flank,row['pos']-1) + row['alt'] + ref_fasta.fetch(row['chrom'],row['pos']+len(row['ref'])-1,row['pos']+len(row['ref'])+flank)
-            altseq = ref_fasta.fetch(row['chrom'],row['pos']-1-flank,row['pos']-1) + row['alt'] + ref_fasta.fetch(row['chrom'],row['pos']+len(row['ref'])-1,row['pos']+len(row['ref'])+flank)
-            df.at[it,'altseq'] = altseq
+    #df['refseq'] = ''
+    #df['altseq'] = ''
 
-        elif row['type'] == 'BND':
+    refseqs = []
+    altseqs = []
+    
+    #for it, row in df.iterrows():
+    for row in df.itertuples():
+        #df.at[it,'refseq'] = ref_fasta.fetch(row['chrom'],row['pos']-1-flank,row['pos']+len(row['ref'])+flank)
+        #refseq = ref_fasta.fetch(row['chrom'],row['pos']-1-flank,row['pos']+len(row['ref'])+flank)
+        #df.at[it,'refseq'] = refseq
+        refseqs.append(ref_fasta.fetch(row.chrom,row.pos-1-flank,row.pos+len(row.ref)+flank))
+        if row.type in ['INDEL','DEL','INS']:
+            #df.at[it,'altseq'] = ref_fasta.fetch(row['chrom'],row['pos']-1-flank,row['pos']-1) + row['alt'] + ref_fasta.fetch(row['chrom'],row['pos']+len(row['ref'])-1,row['pos']+len(row['ref'])+flank)
+            #altseq = ref_fasta.fetch(row['chrom'],row['pos']-1-flank,row['pos']-1) + row['alt'] + ref_fasta.fetch(row['chrom'],row['pos']+len(row['ref'])-1,row['pos']+len(row['ref'])+flank)
+            altseq = ref_fasta.fetch(row.chrom,row.pos-1-flank,row.pos-1) + row.alt + ref_fasta.fetch(row.chrom,row.pos+len(row.ref)-1,row.pos+len(row.ref)+flank)
+            #df.at[it,'altseq'] = altseq
+            altseqs.append(altseq)
+
+        elif row.type == 'BND':
             # Adjust pos2 if its too close to the edge of the reference
-            pos2 = row['pos2']
+            pos2 = row.pos2
             if pos2-1-flank < 0:
                 pos2 = flank + 1
-            elif pos2 + flank > ref_fasta.get_reference_length(row['chrom2']):
-                pos2 = ref_fasta.get_reference_length(row['chrom2']) - flank
+            elif pos2 + flank > ref_fasta.get_reference_length(row.chrom2):
+                pos2 = ref_fasta.get_reference_length(row.chrom2) - flank
 
             #df.at[it,'altseq'] = ref_fasta.fetch(row['chrom'],row['pos']-1-flank,row['pos']-1) + (ref_fasta.fetch(row['chrom2'],pos2-1,pos2+flank) if row['strands']=='++' else revcomp(ref_fasta.fetch(row['chrom2'],pos2-1-flank,pos2)))
-            altseq = ref_fasta.fetch(row['chrom'],row['pos']-1-flank,row['pos']-1) + (ref_fasta.fetch(row['chrom2'],pos2-1,pos2+flank) if row['strands']=='++' else revcomp(ref_fasta.fetch(row['chrom2'],pos2-1-flank,pos2)))
-            df.at[it,'altseq'] = altseq
+            #altseq = ref_fasta.fetch(row['chrom'],row['pos']-1-flank,row['pos']-1) + (ref_fasta.fetch(row['chrom2'],pos2-1,pos2+flank) if row['strands']=='++' else revcomp(ref_fasta.fetch(row['chrom2'],pos2-1-flank,pos2)))
+            altseq = ref_fasta.fetch(row.chrom,row.pos-1-flank,row.pos-1) + (ref_fasta.fetch(row.chrom2,pos2-1,pos2+flank) if row.strands=='++' else revcomp(ref_fasta.fetch(row.chrom2,pos2-1-flank,pos2)))
+            #df.at[it,'altseq'] = altseq
+            altseqs.append(altseq)
+
+    df['refseq'] = refseqs
+    df['altseq'] = altseqs
 
     # PRE-FILTER: Group variants by type for faster processing
     deletion_variants = df[(df['type'] == 'INDEL') & (df['ref'].str.len() > df['alt'].str.len())].copy()
@@ -336,7 +405,10 @@ def add_normal_counts(df, control_bam_file, fasta, chrom, start, end, window, ve
     log.logit(f"Reduced to {total_pairs} read-variant pairs for alignment")
 
     df['control_alt_counts'] = 0
-    df['control_total_counts'] = len(set(r.query_name for r in quality_reads))
+    #df['control_total_counts'] = len(set(r.query_name for r in quality_reads))
+
+    quality_total = len({r.query_name for r in quality_reads})
+    df["control_total_counts"] = quality_total
 
     # Pre-compute alignment matrix and gap penalty (for all alignments)
     alignment_matrix = align.SubstitutionMatrix.std_nucleotide_matrix()
@@ -368,15 +440,21 @@ def add_normal_counts(df, control_bam_file, fasta, chrom, start, end, window, ve
     # Add REF variants back to the DataFrame
     if len(ref_df) > 0:
         ref_df['control_alt_counts'] = 0
-        ref_df['control_total_counts'] = len(set(r.query_name for r in quality_reads))
+        ref_df['control_total_counts'] = quality_total
         df = pd.concat([df, ref_df], ignore_index=True)
+    
+    # Add HR variants back to the DataFrame
+    if len(hr_df) > 0:
+        hr_df['control_alt_counts'] = 0
+        hr_df['control_total_counts'] = quality_total
+        df = pd.concat([df, hr_df], ignore_index=True)
 
     return df.copy()
 
 def summarise_repaired_reads(breaks, summary_outfile, input):
     log.logit(f"Summarising INDELs/BNDs from {input['guide_name']} to {summary_outfile}")
-    total_reads, repaired_reads, control_total_reads, control_repaired_reads = 0, 0, 0, 0
-    repaired_fraction, control_repaired_fraction = 0, 0
+    total_reads, repaired_reads, hr_reads, control_total_reads, control_repaired_reads = 0, 0, 0, 0, 0
+    repaired_fraction, hr_fraction, control_repaired_fraction = 0, 0, 0
     indel_keys, bnd_keys = '.', '.'
 
     indel_count, bnd_count = 0, 0
@@ -391,9 +469,10 @@ def summarise_repaired_reads(breaks, summary_outfile, input):
     bnd_tmej_fraction, bnd_nmh_ej_fraction, bnd_other_fraction = 0, 0, 0
 
     refs = breaks[breaks['type']=='REF'].copy()
+    hrs = breaks[breaks['type']=='HR'].copy()
     indels = breaks[breaks['type']=='INDEL'].copy()
     bnds = breaks[breaks['type']=='BND'].copy()
-    all = pd.concat([refs, indels, bnds], ignore_index=True)
+    all = pd.concat([refs, hrs, indels, bnds], ignore_index=True)
 
     # Handle empty DataFrame or missing columns
     if len(all) == 0:
@@ -401,11 +480,16 @@ def summarise_repaired_reads(breaks, summary_outfile, input):
         # Set all values to 0 and write empty summary
         total_reads = 0
         repaired_reads = 0
+        hr_reads = 0
         control_repaired_reads = 0
         control_total_reads = 0
     else:
         total_reads = sum(all['counts'])
-        repaired_reads = sum(all[all['type']!='REF']['counts'])
+        # Count repaired reads as those that are not REF and HR
+        #repaired_reads = sum(all[all['type']!='REF']['counts'])
+        repaired_reads = sum(all[~all['type'].isin(['REF', 'HR'])]['counts'])
+        hr_reads = sum(all[all['type']=='HR']['counts'])
+        
         # Handle NaN values safely
         control_alt_mean = all['control_alt_counts'].mean() if 'control_alt_counts' in all.columns else 0
         control_total_mean = all['control_total_counts'].mean() if 'control_total_counts' in all.columns else 0
@@ -415,7 +499,9 @@ def summarise_repaired_reads(breaks, summary_outfile, input):
 
     # If we don't have any INDELs, we can skip this
     if len(indels) > 0:
-        indel_count = len(indels[indels['type']!='REF'])
+        # indel_count is the sum of counts for all INDELs not REF and HR
+        #indel_count = len(indels[~indels['type']!='REF'])
+        indel_count = len(indels[~indels['type'].isin(['REF', 'HR'])])
 
         # DNA damage results
         num_indel_nhej = sum(indels['classification'] == 'NHEJ')
@@ -454,7 +540,8 @@ def summarise_repaired_reads(breaks, summary_outfile, input):
         indel_del_other_fraction = round(num_del_other/total_reads,4) if total_reads > 0 else 0
 
     if len(bnds) > 0:
-        bnd_count = len(bnds[bnds['type']!='REF'])
+        #bnd_count = len(bnds[bnds['type']!='REF'])
+        bnd_count = len(bnds[~bnds['type'].isin(['REF', 'HR'])])
 
         # DNA damage results
         num_bnd_tmej = sum(bnds['classification'] == 'TMEJ')
@@ -466,6 +553,7 @@ def summarise_repaired_reads(breaks, summary_outfile, input):
         bnd_other_fraction = round(num_bnd_other/len(bnds),4) if len(bnds) > 0 else 0
     
     repaired_fraction = round(repaired_reads/total_reads,4) if total_reads > 0 else 0
+    hr_fraction = round(hr_reads/total_reads,4) if total_reads > 0 else 0
     control_repaired_fraction = round(control_repaired_reads/control_total_reads,4) if control_total_reads > 0 else 0
     ontarget = ';'.join(input['ontarget']) if isinstance(input['ontarget'], list) else input['ontarget']
     offtargetsites = ';'.join(input['info']) if isinstance(input['info'], list) else input['info']
@@ -479,7 +567,7 @@ def summarise_repaired_reads(breaks, summary_outfile, input):
         input['Chromosome'], input['Start'], input['End'], ';'.join([str(x) for x in input['pam_site']]),
         
         # Overall read counts
-        total_reads, repaired_reads, repaired_fraction, 
+        total_reads, repaired_reads, hr_reads, repaired_fraction, hr_fraction,
         control_total_reads, control_repaired_reads, control_repaired_fraction,
         
         # Variant summary

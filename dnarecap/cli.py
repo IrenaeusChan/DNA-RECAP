@@ -52,7 +52,7 @@ def process_indels(bam_file, control_bam_file, input_file, fasta, window, distan
     outfile_summary = outfile.replace('.tsv', '.summary.tsv')
     header_columns = [
         'chrom', 'start', 'end', 'pam_positions',
-        'total_reads', 'repaired_reads', 'repaired_fraction',
+        'total_reads', 'repaired_reads', 'hr_reads', 'repaired_fraction', 'hr_fraction',
         'control_reads', 'control_repaired_reads', 'control_repaired_fraction',
         'indel_count', 'indel_info', 'bnd_count', 'bnd_info', 'target_info', 'is_target',
         'num_indel_nhej', 'num_indel_tmej', 'num_indel_nmh_ej', 'num_indel_other', 'num_indel_complex',
